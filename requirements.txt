@@ -1,6 +1,6 @@
 io
-pathlib import Path
-numpy as np
-pandas as pd
-matplotlib.pyplot as plt
-streamlit as st
+pathlib
+numpy
+pandas
+matplotlib.pyplot
+streamlit
