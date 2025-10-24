@@ -1,5 +1,7 @@
-streamlit>=1.36,<2
-pandas>=2.1
-numpy>=1.26
-matplotlib>=3.8
-Pillow>=10.0    # fürs Logo (PIL)
+streamlit>=1.33,<2.0
+pandas>=2.2,<2.3
+numpy>=1.26,<2.0
+matplotlib>=3.8,<3.9
+altair>=5.2,<6.0
+pillow>=10.3,<11.0
+
