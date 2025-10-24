@@ -8,9 +8,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 from PIL import Image
+from datetime import timedelta
+import altair as alt
 
 st.set_page_config(page_title="TRY/DAT Wetter-Analyse", layout="wide")
-
 st.title("TRY/DAT Wetter-Analyse – Einlesen, Grafiken & Temperaturbereiche")
 
 with st.expander("Hinweise zum Format", expanded=False):
@@ -37,7 +38,8 @@ show_raw = st.sidebar.checkbox("Rohtext-Vorschau (erste 60 Zeilen)", value=False
 preview_rows = st.sidebar.slider("Vorschau-Zeilen DataFrame", 5, 50, 10, 1)
 
 st.sidebar.header("Darstellung – Allgemein")
-use_grid = st.sidebar.checkbox("Gitter-/Querlinien anzeigen", value=True)
+engine = st.sidebar.selectbox("Diagramm-Engine", ["Matplotlib", "Streamlit (Altair)"], index=0)
+use_grid = st.sidebar.checkbox("Gitter-/Querlinien (Matplotlib)", value=True, help="Gilt nur für Matplotlib")
 show_legend = st.sidebar.checkbox("Legenden anzeigen", value=True)
 ref_lines_str = st.sidebar.text_input("Horizontale Referenzlinien (z. B. 26,28)", value="26,28")
 
@@ -53,7 +55,7 @@ def parse_ref_lines(s: str):
 ref_lines = parse_ref_lines(ref_lines_str)
 
 # ---------------- Sidebar: Logo & Beschriftungen ----------------
-st.sidebar.header("Logo-Overlay")
+st.sidebar.header("Logo-Overlay (nur Matplotlib)")
 logo_file = st.sidebar.file_uploader("Logo hochladen (PNG/JPG)", type=["png", "jpg", "jpeg"])
 logo_pos = st.sidebar.selectbox("Logo-Position", ["oben rechts", "oben links", "unten rechts", "unten links"], index=0)
 logo_scale = st.sidebar.slider("Logo-Größe (% der Axenbreite)", 5, 40, 18, 1)
@@ -113,7 +115,6 @@ bands = default_bands
 uploaded = st.file_uploader("DAT-Datei hier ablegen oder auswählen", type=["dat", "txt"], accept_multiple_files=False)
 
 def decode_bytes(data: bytes) -> str:
-    """Versuche UTF-8, dann Latin-1."""
     for enc in ("utf-8", "latin-1"):
         try:
             return data.decode(enc)
@@ -128,24 +129,20 @@ def load_dat_from_text(text: str, data_start_line: int, decimal: str) -> pd.Data
         sep=r"\s+",
         decimal=decimal,
         header=None,
-        skiprows=data_start_line - 1,  # 1-basiert → 0-basiert
+        skiprows=data_start_line - 1,
         engine="python"
     )
     if df.shape[1] != len(cols):
-        raise ValueError(f"Unerwartete Spaltenanzahl: {df.shape[1]} statt {len(cols)}. "
-                         f"Prüfe Datenstart-Zeile/Trenner.")
+        raise ValueError(f"Unerwartete Spaltenanzahl: {df.shape[1]} statt {len(cols)}. Prüfe Datenstart-Zeile/Trenner.")
     df.columns = cols
 
-    # Zahlen sicher parsen
     num_cols = ["t","WG","x","B","D","A"]
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-
     for c in ["RW","HW","MM","DD","HH","p","WR","N","RF","E","IL"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce", downcast="integer")
-
     return df
 
 def build_timestamp(df: pd.DataFrame, year: int, hour_is_end: bool) -> pd.DataFrame:
@@ -157,11 +154,7 @@ def build_timestamp(df: pd.DataFrame, year: int, hour_is_end: bool) -> pd.DataFr
         hh = (hh - 1).clip(lower=0, upper=23)
     mm = pd.to_numeric(out["MM"], errors="coerce").fillna(1).astype(int).clip(1, 12)
     dd = pd.to_numeric(out["DD"], errors="coerce").fillna(1).astype(int).clip(1, 31)
-
-    out["ts"] = pd.to_datetime(
-        {"year": int(year), "month": mm, "day": dd, "hour": hh},
-        errors="coerce"
-    )
+    out["ts"] = pd.to_datetime({"year": int(year), "month": mm, "day": dd, "hour": hh}, errors="coerce")
     return out
 
 def summarize_temp_bands(df: pd.DataFrame, temp_col="t", bands_list=None) -> pd.DataFrame:
@@ -178,6 +171,7 @@ def summarize_temp_bands(df: pd.DataFrame, temp_col="t", bands_list=None) -> pd.
         rows.append({"Band": label, "Stunden": cnt, "Anteil_%": share, "kumuliert_Stunden": cum})
     return pd.DataFrame(rows)
 
+# ---------- Matplotlib Helfer ----------
 def add_grid(ax):
     if use_grid:
         ax.grid(True, which="both", axis="both", alpha=0.3)
@@ -197,36 +191,23 @@ def apply_labels(ax, title=None, xlabel=None, ylabel=None):
         ax.set_ylabel(ylabel)
 
 def draw_logo(ax, logo_img: Image.Image, position="oben rechts", scale=0.18, alpha=0.85, pad=0.001):
-    """
-    Blendet ein Logo als "Inset Axes" ein.
-    - scale: Anteil der Axenbreite (0..1)
-    - pad: Abstand zum Rand in Achsenkoordinaten (0..0.1 sinnvoll)
-    """
     if logo_img is None:
         return
-    # Größe des Logos erhalten (Seitenverhältnis)
     w, h = logo_img.size
     aspect = h / w if w else 1.0
-
-    # Breite/Höhe in Achsenkoordinaten
     w_ax = scale
     h_ax = scale * aspect
-
-    # Position
     if position == "oben rechts":
         x0, y0 = 1 - w_ax - pad, 1 - h_ax - pad
     elif position == "oben links":
         x0, y0 = pad, 1 - h_ax - pad
     elif position == "unten rechts":
         x0, y0 = 1 - w_ax - pad, pad
-    else:  # unten links
+    else:
         x0, y0 = pad, pad
-
     inset_ax = ax.inset_axes([x0, y0, w_ax, h_ax])
     inset_ax.imshow(logo_img)
     inset_ax.set_axis_off()
-    # Transparenz via Alpha-Maske simulieren (bei PNG mit Transparenz schon okay),
-    # ansonsten via zorder + leichtem alpha der Achse:
     for im in inset_ax.get_images():
         im.set_alpha(alpha)
 
@@ -234,79 +215,125 @@ def get_logo_image():
     if logo_file is None:
         return None
     try:
-        img = Image.open(logo_file).convert("RGBA")
-        return img
+        return Image.open(logo_file).convert("RGBA")
     except Exception:
         return None
 
+# ---------- Altair Helfer ----------
+def ref_rules_altair(values):
+    rules = []
+    for v in values:
+        rules.append(
+            alt.Chart(pd.DataFrame({"y": [v]})).mark_rule(strokeDash=[6,4], opacity=0.6).encode(y="y:Q")
+        )
+    return rules
+
+# ---------- Plotter ----------
 def plot_timeseries(df: pd.DataFrame, logo_img):
     if "ts" not in df.columns or df["ts"].isna().all():
         st.info("Keine gültige Zeitachse verfügbar → Zeitreihe/MinMax werden ausgelassen.")
         return
     d = df.set_index("ts").sort_index()
 
-    # Zeitreihe + 24h Mittel
-    fig1, ax1 = plt.subplots(figsize=(11, 4))
-    pd.to_numeric(d["t"], errors="coerce").plot(ax=ax1, label="Temperatur [°C]")
-    pd.to_numeric(d["t"], errors="coerce").rolling("24H").mean().plot(ax=ax1, label="24h-Mittel")
-    add_grid(ax1)
-    add_ref_lines(ax1, ref_lines)
-    apply_labels(ax1, title_ts, xlabel_ts, ylabel_ts)
-    if show_legend:
-        ax1.legend()
-    draw_logo(ax1, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
-    fig1.tight_layout()
-    st.pyplot(fig1)
+    if engine == "Matplotlib":
+        # Zeitreihe + 24h Mittel
+        fig1, ax1 = plt.subplots(figsize=(11, 4))
+        pd.to_numeric(d["t"], errors="coerce").plot(ax=ax1, label="Temperatur [°C]")
+        pd.to_numeric(d["t"], errors="coerce").rolling("24H").mean().plot(ax=ax1, label="24h-Mittel")
+        add_grid(ax1); add_ref_lines(ax1, ref_lines); apply_labels(ax1, title_ts, xlabel_ts, ylabel_ts)
+        if show_legend: ax1.legend()
+        draw_logo(ax1, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
+        fig1.tight_layout(); st.pyplot(fig1)
 
-    # Tages-Min/Max
-    daily = pd.to_numeric(d["t"], errors="coerce").resample("D").agg(["min","max"])
-    fig2, ax2 = plt.subplots(figsize=(11, 3.6))
-    daily["min"].plot(ax=ax2, label="Tagesminimum")
-    daily["max"].plot(ax=ax2, label="Tagesmaximum")
-    add_grid(ax2)
-    add_ref_lines(ax2, ref_lines)
-    apply_labels(ax2, title_minmax, xlabel_minmax, ylabel_minmax)
-    if show_legend:
-        ax2.legend()
-    draw_logo(ax2, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
-    fig2.tight_layout()
-    st.pyplot(fig2)
+        # Tages-Min/Max
+        daily = pd.to_numeric(d["t"], errors="coerce").resample("D").agg(["min","max"])
+        fig2, ax2 = plt.subplots(figsize=(11, 3.6))
+        daily["min"].plot(ax=ax2, label="Tagesminimum"); daily["max"].plot(ax=ax2, label="Tagesmaximum")
+        add_grid(ax2); add_ref_lines(ax2, ref_lines); apply_labels(ax2, title_minmax, xlabel_minmax, ylabel_minmax)
+        if show_legend: ax2.legend()
+        draw_logo(ax2, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
+        fig2.tight_layout(); st.pyplot(fig2)
+    else:
+        # Altair: Zeitreihe + 24h-Mittel (vorberechnen)
+        d2 = d.reset_index()[["ts","t"]].copy()
+        d2["t"] = pd.to_numeric(d2["t"], errors="coerce")
+        roll = d2.set_index("ts")["t"].rolling("24H").mean().reset_index().rename(columns={"t":"t_mean"})
+        merged = d2.merge(roll, on="ts", how="left")
+
+        base = alt.Chart(merged).encode(x=alt.X("ts:T", title=xlabel_ts))
+        line1 = base.mark_line().encode(
+            y=alt.Y("t:Q", title=ylabel_ts),
+            tooltip=[alt.Tooltip("ts:T", title="Zeit"), alt.Tooltip("t:Q", title="T [°C]")]
+        ).properties(title=title_ts)
+        line2 = base.mark_line(strokeDash=[4,4]).encode(
+            y=alt.Y("t_mean:Q", title="24h-Mittel"),
+            tooltip=[alt.Tooltip("ts:T", title="Zeit"), alt.Tooltip("t_mean:Q", title="24h-Mittel")]
+        )
+        chart = line1 + line2
+        for r in ref_rules_altair(ref_lines): chart = chart + r
+        st.altair_chart(chart.interactive(), use_container_width=True)
+
+        # Tages-Min/Max
+        daily = d2.set_index("ts")["t"].resample("D").agg(["min","max"]).reset_index()
+        base2 = alt.Chart(daily).encode(x=alt.X("ts:T", title=xlabel_minmax))
+        cmin = base2.mark_line().encode(
+            y=alt.Y("min:Q", title=ylabel_minmax),
+            tooltip=[alt.Tooltip("ts:T", title="Datum"), alt.Tooltip("min:Q", title="Min")]
+        )
+        cmax = base2.mark_line().encode(
+            y=alt.Y("max:Q", title=ylabel_minmax),
+            tooltip=[alt.Tooltip("ts:T", title="Datum"), alt.Tooltip("max:Q", title="Max")]
+        ).properties(title=title_minmax)
+        chart2 = cmin + cmax
+        for r in ref_rules_altair(ref_lines): chart2 = chart2 + r
+        st.altair_chart(chart2.interactive(), use_container_width=True)
+
+        st.caption("Hinweis: Logo-Overlay & 2. y-Achse sind im Altair-Modus deaktiviert.")
 
 def plot_hist_box(df: pd.DataFrame, logo_img):
     t_series = pd.to_numeric(df["t"], errors="coerce").dropna()
+    if engine == "Matplotlib":
+        fig3, ax3 = plt.subplots(figsize=(7.5, 3.8))
+        ax3.hist(t_series.values, bins=40)
+        add_grid(ax3); add_ref_lines(ax3, ref_lines); apply_labels(ax3, title_hist, xlabel_hist, ylabel_hist)
+        draw_logo(ax3, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
+        fig3.tight_layout(); st.pyplot(fig3)
 
-    # Histogramm
-    fig3, ax3 = plt.subplots(figsize=(7.5, 3.8))
-    ax3.hist(t_series.values, bins=40)
-    add_grid(ax3)
-    add_ref_lines(ax3, ref_lines)
-    apply_labels(ax3, title_hist, xlabel_hist, ylabel_hist)
-    draw_logo(ax3, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
-    fig3.tight_layout()
-    st.pyplot(fig3)
+        if "ts" in df.columns and df["ts"].notna().any():
+            tmp = df.dropna(subset=["ts"]).copy()
+            tmp["Monat"] = tmp["ts"].dt.month
+            fig4, ax4 = plt.subplots(figsize=(9.5, 3.8))
+            tmp.boxplot(column="t", by="Monat", grid=False, ax=ax4)
+            add_grid(ax4); add_ref_lines(ax4, ref_lines); apply_labels(ax4, title_box, xlabel_box, ylabel_box)
+            fig4.suptitle("")
+            draw_logo(ax4, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
+            fig4.tight_layout(); st.pyplot(fig4)
+    else:
+        dfh = pd.DataFrame({"t": t_series})
+        hist = alt.Chart(dfh, title=title_hist).mark_bar().encode(
+            x=alt.X("t:Q", bin=alt.Bin(maxbins=40), title=xlabel_hist),
+            y=alt.Y("count():Q", title=ylabel_hist),
+            tooltip=[alt.Tooltip("count():Q", title="Anzahl")]
+        )
+        for r in ref_rules_altair(ref_lines): hist = hist + r
+        st.altair_chart(hist.interactive(), use_container_width=True)
 
-    # Monats-Boxplot (nur mit ts)
-    if "ts" in df.columns and df["ts"].notna().any():
-        tmp = df.dropna(subset=["ts"]).copy()
-        tmp["Monat"] = tmp["ts"].dt.month
-        fig4, ax4 = plt.subplots(figsize=(9.5, 3.8))
-        tmp.boxplot(column="t", by="Monat", grid=False, ax=ax4)
-        add_grid(ax4)
-        add_ref_lines(ax4, ref_lines)
-        apply_labels(ax4, title_box, xlabel_box, ylabel_box)
-        fig4.suptitle("")
-        draw_logo(ax4, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
-        fig4.tight_layout()
-        st.pyplot(fig4)
+        if "ts" in df.columns and df["ts"].notna().any():
+            tmp = df.dropna(subset=["ts", "t"]).copy()
+            tmp["Monat"] = tmp["ts"].dt.month
+            box = alt.Chart(tmp, title=title_box).mark_boxplot().encode(
+                x=alt.X("Monat:O", title=xlabel_box),
+                y=alt.Y("t:Q", title=ylabel_box)
+            )
+            for r in ref_rules_altair(ref_lines): box = box + r
+            st.altair_chart(box, use_container_width=True)
 
 def plot_custom_variables(df: pd.DataFrame, logo_img):
     st.subheader("Individuelle Variablen-Grafik")
 
-    # Numerische Spalten
     numeric_cols = [c for c in df.columns if c != "ts" and pd.api.types.is_numeric_dtype(df[c])]
     if not numeric_cols:
-        st.info("Keine numerischen Spalten gefunden.")
-        return
+        st.info("Keine numerischen Spalten gefunden."); return
 
     default_selection = [c for c in ["t","WG","RF"] if c in numeric_cols]
     sel = st.multiselect("Variablen (y-Achse)", options=numeric_cols, default=default_selection or [numeric_cols[0]])
@@ -320,21 +347,20 @@ def plot_custom_variables(df: pd.DataFrame, logo_img):
         agg = st.selectbox("Aggregation", ["Mittel", "Min", "Max"], index=0)
 
     use_second_axis = False
-    if len(sel) == 2:
-        use_second_axis = st.checkbox("Zweite y-Achse für zweite Variable", value=False)
+    if len(sel) == 2 and engine == "Matplotlib":
+        use_second_axis = st.checkbox("Zweite y-Achse für zweite Variable (nur Matplotlib)", value=False)
+    elif engine != "Matplotlib":
+        st.caption("Hinweis: Im Altair-Modus wird keine zweite y-Achse angeboten.")
 
     if not sel:
-        st.info("Bitte mindestens eine Variable auswählen.")
-        return
+        st.info("Bitte mindestens eine Variable auswählen."); return
 
     # Daten vorbereiten
     data = df.copy()
     if x_choice.startswith("Zeit") and "ts" in data.columns and data["ts"].notna().any():
-        data = data.set_index("ts").sort_index()
-        can_resample = True
+        data = data.set_index("ts").sort_index(); can_resample = True
     else:
-        data = data.reset_index(drop=True)
-        can_resample = False
+        data = data.reset_index(drop=True); can_resample = False
         if resample != "Keins":
             st.warning("Resampling erfordert eine gültige Zeitachse – wurde deaktiviert.")
             resample = "Keins"
@@ -346,31 +372,46 @@ def plot_custom_variables(df: pd.DataFrame, logo_img):
     else:
         data = data[sel]
 
-    fig, ax = plt.subplots(figsize=(12, 4.2))
-    if len(sel) == 1 or not use_second_axis:
-        for c in sel:
-            pd.to_numeric(data[c], errors="coerce").plot(ax=ax, label=c)
-        add_grid(ax)
-        apply_labels(ax, title_custom, xlabel_custom, ylabel_custom)
-        if show_legend:
-            ax.legend()
+    if engine == "Matplotlib":
+        fig, ax = plt.subplots(figsize=(12, 4.2))
+        if len(sel) == 1 or not use_second_axis:
+            for c in sel:
+                pd.to_numeric(data[c], errors="coerce").plot(ax=ax, label=c)
+            add_grid(ax); apply_labels(ax, title_custom, xlabel_custom, ylabel_custom)
+            if show_legend: ax.legend()
+        else:
+            c1, c2 = sel[0], sel[1]
+            pd.to_numeric(data[c1], errors="coerce").plot(ax=ax, label=c1)
+            ax2 = ax.twinx()
+            pd.to_numeric(data[c2], errors="coerce").plot(ax=ax2, label=c2, linestyle="--")
+            add_grid(ax); apply_labels(ax, title_custom, xlabel_custom, ylabel_custom)
+            ax2.set_ylabel(ylabel2_custom if ylabel2_custom.strip() else c2)
+            if show_legend:
+                lines = ax.get_lines() + ax2.get_lines()
+                labels = [l.get_label() for l in lines]
+                ax.legend(lines, labels, loc="best")
+        draw_logo(ax, get_logo_image(), position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
+        fig.tight_layout(); st.pyplot(fig)
     else:
-        c1, c2 = sel[0], sel[1]
-        pd.to_numeric(data[c1], errors="coerce").plot(ax=ax, label=c1)
-        ax2 = ax.twinx()
-        pd.to_numeric(data[c2], errors="coerce").plot(ax=ax2, label=c2, linestyle="--")
-        add_grid(ax)
-        apply_labels(ax, title_custom, xlabel_custom, ylabel_custom)
-        ax2.set_ylabel(ylabel2_custom if ylabel2_custom.strip() else c2)
-        # Gemeinsame Legende
-        if show_legend:
-            lines = ax.get_lines() + ax2.get_lines()
-            labels = [l.get_label() for l in lines]
-            ax.legend(lines, labels, loc="best")
+        # Altair: mehrere Variablen als lange Tabelle
+        data_alt = data.copy().reset_index()
+        if "ts" in df.columns and x_choice.startswith("Zeit") and data_alt.columns[0] == "ts":
+            x_enc = alt.X("ts:T", title=xlabel_custom)
+            tooltip_x = alt.Tooltip("ts:T", title="Zeit")
+        else:
+            x_enc = alt.X(data_alt.columns[0], title=xlabel_custom)
+            tooltip_x = alt.Tooltip(data_alt.columns[0], title="x")
 
-    draw_logo(ax, get_logo_image(), position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
-    fig.tight_layout()
-    st.pyplot(fig)
+        melted = data_alt.melt(id_vars=[data_alt.columns[0]], var_name="Variable", value_name="Wert")
+        chart = alt.Chart(melted, title=title_custom).mark_line().encode(
+            x=x_enc,
+            y=alt.Y("Wert:Q", title=ylabel_custom),
+            color="Variable:N",
+            tooltip=[tooltip_x, alt.Tooltip("Variable:N", title="Variable"), alt.Tooltip("Wert:Q", title="Wert")]
+        )
+        for r in ref_rules_altair(ref_lines): chart = chart + r
+        st.altair_chart(chart.interactive(), use_container_width=True)
+        st.caption("Hinweis: Zweite y-Achse nicht verfügbar im Altair-Modus.")
 
 # ---------------- Main Flow ----------------
 if uploaded is None:
@@ -396,11 +437,7 @@ else:
         else:
             text_for_parse = text
 
-        df = load_dat_from_text(
-            text_for_parse,
-            data_start_line=int(data_start_line),
-            decimal=decimal_char
-        )
+        df = load_dat_from_text(text_for_parse, data_start_line=int(data_start_line), decimal=decimal_char)
 
         # Solarspalten ggf. entfernen
         if drop_solar:
@@ -411,6 +448,24 @@ else:
         # Zeitstempel
         df = build_timestamp(df, year=int(year), hour_is_end=bool(hour_is_end))
 
+        # ---------- Zeitraum-Filter via Kalender ----------
+        if "ts" in df.columns and df["ts"].notna().any():
+            st.markdown("### Zeitraum filtern")
+            dmin = pd.to_datetime(df["ts"]).min().date()
+            dmax = pd.to_datetime(df["ts"]).max().date()
+            picked = st.date_input("Datumsbereich wählen", value=(dmin, dmax), min_value=dmin, max_value=dmax)
+            if isinstance(picked, tuple) and len(picked) == 2:
+                start_d, end_d = picked
+            else:
+                start_d = end_d = picked
+            if start_d > end_d:
+                start_d, end_d = end_d, start_d
+            start_ts = pd.Timestamp.combine(start_d, pd.Timestamp.min.time())
+            end_ts = pd.Timestamp.combine(end_d + timedelta(days=1), pd.Timestamp.min.time())
+            mask = (df["ts"] >= start_ts) & (df["ts"] < end_ts)
+            df = df.loc[mask].reset_index(drop=True)
+            st.caption(f"Gefilterter Zeitraum: {start_d} bis {end_d} – {len(df)} Zeilen")
+
         # Vorschau
         st.subheader("Datenvorschau")
         st.dataframe(df.head(preview_rows))
@@ -418,45 +473,31 @@ else:
         # Kennzahlen
         tnum = pd.to_numeric(df["t"], errors="coerce")
         c1, c2, c3, c4, c5 = st.columns(5)
-        with c1:
-            st.metric("Zeilen (h)", len(df))
-        with c2:
-            st.metric("Min Temp [°C]", f"{tnum.min():.1f}" if tnum.notna().any() else "—")
-        with c3:
-            st.metric("Max Temp [°C]", f"{tnum.max():.1f}" if tnum.notna().any() else "—")
-        with c4:
-            st.metric("NaN in t", int(tnum.isna().sum()))
-        with c5:
-            st.metric("WG Mittel [m/s]", f"{pd.to_numeric(df['WG'], errors='coerce').mean():.2f}" if 'WG' in df else "—")
+        with c1: st.metric("Zeilen (h)", len(df))
+        with c2: st.metric("Min Temp [°C]", f"{tnum.min():.1f}" if tnum.notna().any() else "—")
+        with c3: st.metric("Max Temp [°C]", f"{tnum.max():.1f}" if tnum.notna().any() else "—")
+        with c4: st.metric("NaN in t", int(tnum.isna().sum()))
+        with c5: st.metric("WG Mittel [m/s]", f"{pd.to_numeric(df['WG'], errors='coerce').mean():.2f}" if 'WG' in df else "—")
 
         # Diagramme
-        st.markdown("---")
-        st.subheader("Grafiken")
-        logo_img = get_logo_image()
+        st.markdown("---"); st.subheader("Grafiken")
+        logo_img = get_logo_image() if engine == "Matplotlib" else None
         plot_timeseries(df, logo_img)
         plot_hist_box(df, logo_img)
 
         # Temperaturbänder
-        st.markdown("---")
-        st.subheader("Auswertung Temperaturbereiche")
+        st.markdown("---"); st.subheader("Auswertung Temperaturbereiche")
         bands_df = summarize_temp_bands(df, temp_col="t", bands_list=bands)
         st.dataframe(bands_df)
-
         colA, colB = st.columns(2)
         with colA:
-            st.download_button(
-                label="Temperaturbänder als CSV herunterladen",
-                data=bands_df.to_csv(index=False).encode("utf-8"),
-                file_name="temperaturbaender_summary.csv",
-                mime="text/csv",
-            )
+            st.download_button("Temperaturbänder als CSV herunterladen",
+                               data=bands_df.to_csv(index=False).encode("utf-8"),
+                               file_name="temperaturbaender_summary.csv", mime="text/csv")
         with colB:
-            st.download_button(
-                label="Gereinigte Daten (aktueller Stand) als CSV",
-                data=df.to_csv(index=False).encode("utf-8"),
-                file_name="daten_aufbereitet.csv",
-                mime="text/csv",
-            )
+            st.download_button("Gereinigte Daten (aktueller Stand) als CSV",
+                               data=df.to_csv(index=False).encode("utf-8"),
+                               file_name="daten_aufbereitet.csv", mime="text/csv")
 
         st.markdown("---")
         plot_custom_variables(df, logo_img)
