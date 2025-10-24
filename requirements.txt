@@ -1,7 +1,5 @@
-io
-pathlib
-numpy
-pandas
-matplotlib.pyplot
-streamlit
-PIL
+streamlit>=1.36,<2
+pandas>=2.1
+numpy>=1.26
+matplotlib>=3.8
+Pillow>=10.0    # fürs Logo (PIL)
