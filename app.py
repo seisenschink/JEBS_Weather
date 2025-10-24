@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+from PIL import Image
 
 st.set_page_config(page_title="TRY/DAT Wetter-Analyse", layout="wide")
 
@@ -23,12 +24,10 @@ with st.expander("Hinweise zum Format", expanded=False):
 """)
 
 # ---------------- Sidebar: Einstellungen ----------------
-st.sidebar.header("Einstellungen")
-
+st.sidebar.header("Einstellungen – Import")
 header_line = st.sidebar.number_input("Header-Zeile (1-basiert)", min_value=1, value=33, step=1)
 skip_comment_line = st.sidebar.checkbox("Zeile 34 als Kommentar überspringen", value=True)
 data_start_line = st.sidebar.number_input("Datenstart-Zeile (1-basiert)", min_value=1, value=35, step=1)
-
 decimal_char = st.sidebar.selectbox("Dezimaltrenner", options=[",", "."], index=0)
 drop_solar = st.sidebar.checkbox("Solarspalten (B, D, A) entfernen", value=True)
 hour_is_end = st.sidebar.checkbox("HH = 1..24 (Ende der Stunde)", value=True)
@@ -37,10 +36,11 @@ year = st.sidebar.number_input("Jahr für Zeitstempel (0 = ohne Zeit)", min_valu
 show_raw = st.sidebar.checkbox("Rohtext-Vorschau (erste 60 Zeilen)", value=False)
 preview_rows = st.sidebar.slider("Vorschau-Zeilen DataFrame", 5, 50, 10, 1)
 
-# Darstellung
-st.sidebar.subheader("Darstellung")
+st.sidebar.header("Darstellung – Allgemein")
 use_grid = st.sidebar.checkbox("Gitter-/Querlinien anzeigen", value=True)
-ref_lines_str = st.sidebar.text_input("Horizontale Referenzlinien (°C, Komma-getrennt)", value="26,28")
+show_legend = st.sidebar.checkbox("Legenden anzeigen", value=True)
+ref_lines_str = st.sidebar.text_input("Horizontale Referenzlinien (z. B. 26,28)", value="26,28")
+
 def parse_ref_lines(s: str):
     out = []
     for part in s.split(","):
@@ -52,8 +52,50 @@ def parse_ref_lines(s: str):
     return out
 ref_lines = parse_ref_lines(ref_lines_str)
 
-# Temperaturbänder (anpassbar)
-st.sidebar.subheader("Temperaturbänder")
+# ---------------- Sidebar: Logo & Beschriftungen ----------------
+st.sidebar.header("Logo-Overlay")
+logo_file = st.sidebar.file_uploader("Logo hochladen (PNG/JPG)", type=["png", "jpg", "jpeg"])
+logo_pos = st.sidebar.selectbox("Logo-Position", ["oben rechts", "oben links", "unten rechts", "unten links"], index=0)
+logo_scale = st.sidebar.slider("Logo-Größe (% der Axenbreite)", 5, 40, 18, 1)
+logo_alpha = st.sidebar.slider("Logo-Transparenz", 0.0, 1.0, 0.85, 0.05)
+logo_padding = 0.02  # Abstand zum Rand (als Anteil)
+
+# Beschriftungen je Plot
+st.sidebar.header("Beschriftungen – Diagramme")
+
+# Zeitreihe
+st.sidebar.subheader("Temperatur – Zeitreihe")
+title_ts = st.sidebar.text_input("Titel (Zeitreihe)", "Temperatur – Zeitreihe")
+xlabel_ts = st.sidebar.text_input("x-Achse (Zeitreihe)", "Zeit")
+ylabel_ts = st.sidebar.text_input("y-Achse (Zeitreihe)", "°C")
+
+# Tages-Min/Max
+st.sidebar.subheader("Temperatur – Tages-Min/Max")
+title_minmax = st.sidebar.text_input("Titel (Min/Max)", "Tages-Min/Max")
+xlabel_minmax = st.sidebar.text_input("x-Achse (Min/Max)", "Datum")
+ylabel_minmax = st.sidebar.text_input("y-Achse (Min/Max)", "°C")
+
+# Histogramm
+st.sidebar.subheader("Histogramm Temperatur")
+title_hist = st.sidebar.text_input("Titel (Histogramm)", "Histogramm Temperatur")
+xlabel_hist = st.sidebar.text_input("x-Achse (Histogramm)", "Temperatur [°C]")
+ylabel_hist = st.sidebar.text_input("y-Achse (Histogramm)", "Häufigkeit [h]")
+
+# Monats-Boxplot
+st.sidebar.subheader("Monats-Boxplot Temperatur")
+title_box = st.sidebar.text_input("Titel (Boxplot)", "Monats-Boxplot Temperatur")
+xlabel_box = st.sidebar.text_input("x-Achse (Boxplot)", "Monat")
+ylabel_box = st.sidebar.text_input("y-Achse (Boxplot)", "°C")
+
+# Custom-Plot
+st.sidebar.subheader("Individuelle Variablen")
+title_custom = st.sidebar.text_input("Titel (Individuell)", "Individuelle Variablen")
+xlabel_custom = st.sidebar.text_input("x-Achse (Individuell)", "Zeit / Index")
+ylabel_custom = st.sidebar.text_input("y-Achse links (Individuell)", "Wert")
+ylabel2_custom = st.sidebar.text_input("y-Achse rechts (bei 2. Achse)", "Wert 2")
+
+# Temperaturbänder
+st.sidebar.header("Temperaturbänder")
 default_bands = [
     ("≤16°C",      -273.15, 16.0),
     ("16–18°C",     16.0,   18.0),
@@ -81,7 +123,6 @@ def decode_bytes(data: bytes) -> str:
 
 def load_dat_from_text(text: str, data_start_line: int, decimal: str) -> pd.DataFrame:
     cols = ["RW","HW","MM","DD","HH","t","p","WR","WG","N","x","RF","B","D","A","E","IL"]
-    # Wichtig: KEIN dtype=str → damit decimal=',' wirkt und Zahlen direkt korrekt geparst werden.
     df = pd.read_csv(
         io.StringIO(text),
         sep=r"\s+",
@@ -95,13 +136,12 @@ def load_dat_from_text(text: str, data_start_line: int, decimal: str) -> pd.Data
                          f"Prüfe Datenstart-Zeile/Trenner.")
     df.columns = cols
 
-    # Sicherstellen, dass t/WG/x numerisch sind (falls einzelne Zeilen doch Strings enthalten)
+    # Zahlen sicher parsen
     num_cols = ["t","WG","x","B","D","A"]
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Integers „weich“ casten (lassen NaN zu)
     for c in ["RW","HW","MM","DD","HH","p","WR","N","RF","E","IL"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce", downcast="integer")
@@ -142,14 +182,64 @@ def add_grid(ax):
     if use_grid:
         ax.grid(True, which="both", axis="both", alpha=0.3)
 
-def add_ref_lines(ax, ref_vals, color=None):
-    # Nur zeichnen, wenn Werte vorhanden
+def add_ref_lines(ax, ref_vals):
     if not ref_vals:
         return
     for v in ref_vals:
         ax.axhline(v, linestyle="--", linewidth=1, alpha=0.6)
 
-def plot_timeseries(df: pd.DataFrame):
+def apply_labels(ax, title=None, xlabel=None, ylabel=None):
+    if title is not None:
+        ax.set_title(title)
+    if xlabel is not None:
+        ax.set_xlabel(xlabel)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+
+def draw_logo(ax, logo_img: Image.Image, position="oben rechts", scale=0.18, alpha=0.85, pad=0.001):
+    """
+    Blendet ein Logo als "Inset Axes" ein.
+    - scale: Anteil der Axenbreite (0..1)
+    - pad: Abstand zum Rand in Achsenkoordinaten (0..0.1 sinnvoll)
+    """
+    if logo_img is None:
+        return
+    # Größe des Logos erhalten (Seitenverhältnis)
+    w, h = logo_img.size
+    aspect = h / w if w else 1.0
+
+    # Breite/Höhe in Achsenkoordinaten
+    w_ax = scale
+    h_ax = scale * aspect
+
+    # Position
+    if position == "oben rechts":
+        x0, y0 = 1 - w_ax - pad, 1 - h_ax - pad
+    elif position == "oben links":
+        x0, y0 = pad, 1 - h_ax - pad
+    elif position == "unten rechts":
+        x0, y0 = 1 - w_ax - pad, pad
+    else:  # unten links
+        x0, y0 = pad, pad
+
+    inset_ax = ax.inset_axes([x0, y0, w_ax, h_ax])
+    inset_ax.imshow(logo_img)
+    inset_ax.set_axis_off()
+    # Transparenz via Alpha-Maske simulieren (bei PNG mit Transparenz schon okay),
+    # ansonsten via zorder + leichtem alpha der Achse:
+    for im in inset_ax.get_images():
+        im.set_alpha(alpha)
+
+def get_logo_image():
+    if logo_file is None:
+        return None
+    try:
+        img = Image.open(logo_file).convert("RGBA")
+        return img
+    except Exception:
+        return None
+
+def plot_timeseries(df: pd.DataFrame, logo_img):
     if "ts" not in df.columns or df["ts"].isna().all():
         st.info("Keine gültige Zeitachse verfügbar → Zeitreihe/MinMax werden ausgelassen.")
         return
@@ -161,8 +251,11 @@ def plot_timeseries(df: pd.DataFrame):
     pd.to_numeric(d["t"], errors="coerce").rolling("24H").mean().plot(ax=ax1, label="24h-Mittel")
     add_grid(ax1)
     add_ref_lines(ax1, ref_lines)
-    ax1.set_xlabel("Zeit"); ax1.set_ylabel("°C"); ax1.set_title("Temperatur – Zeitreihe")
-    ax1.legend(); fig1.tight_layout()
+    apply_labels(ax1, title_ts, xlabel_ts, ylabel_ts)
+    if show_legend:
+        ax1.legend()
+    draw_logo(ax1, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
+    fig1.tight_layout()
     st.pyplot(fig1)
 
     # Tages-Min/Max
@@ -172,11 +265,14 @@ def plot_timeseries(df: pd.DataFrame):
     daily["max"].plot(ax=ax2, label="Tagesmaximum")
     add_grid(ax2)
     add_ref_lines(ax2, ref_lines)
-    ax2.set_xlabel("Datum"); ax2.set_ylabel("°C"); ax2.set_title("Tages-Min/Max")
-    ax2.legend(); fig2.tight_layout()
+    apply_labels(ax2, title_minmax, xlabel_minmax, ylabel_minmax)
+    if show_legend:
+        ax2.legend()
+    draw_logo(ax2, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
+    fig2.tight_layout()
     st.pyplot(fig2)
 
-def plot_hist_box(df: pd.DataFrame):
+def plot_hist_box(df: pd.DataFrame, logo_img):
     t_series = pd.to_numeric(df["t"], errors="coerce").dropna()
 
     # Histogramm
@@ -184,8 +280,8 @@ def plot_hist_box(df: pd.DataFrame):
     ax3.hist(t_series.values, bins=40)
     add_grid(ax3)
     add_ref_lines(ax3, ref_lines)
-    ax3.set_xlabel("Temperatur [°C]"); ax3.set_ylabel("Häufigkeit [h]")
-    ax3.set_title("Histogramm Temperatur")
+    apply_labels(ax3, title_hist, xlabel_hist, ylabel_hist)
+    draw_logo(ax3, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
     fig3.tight_layout()
     st.pyplot(fig3)
 
@@ -197,14 +293,16 @@ def plot_hist_box(df: pd.DataFrame):
         tmp.boxplot(column="t", by="Monat", grid=False, ax=ax4)
         add_grid(ax4)
         add_ref_lines(ax4, ref_lines)
-        ax4.set_title("Monats-Boxplot Temperatur"); ax4.set_xlabel("Monat"); ax4.set_ylabel("°C")
-        fig4.suptitle(""); fig4.tight_layout()
+        apply_labels(ax4, title_box, xlabel_box, ylabel_box)
+        fig4.suptitle("")
+        draw_logo(ax4, logo_img, position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
+        fig4.tight_layout()
         st.pyplot(fig4)
 
-def plot_custom_variables(df: pd.DataFrame):
+def plot_custom_variables(df: pd.DataFrame, logo_img):
     st.subheader("Individuelle Variablen-Grafik")
 
-    # Welche Spalten sind numerisch?
+    # Numerische Spalten
     numeric_cols = [c for c in df.columns if c != "ts" and pd.api.types.is_numeric_dtype(df[c])]
     if not numeric_cols:
         st.info("Keine numerischen Spalten gefunden.")
@@ -221,7 +319,6 @@ def plot_custom_variables(df: pd.DataFrame):
     with colX3:
         agg = st.selectbox("Aggregation", ["Mittel", "Min", "Max"], index=0)
 
-    # Optional zweite y-Achse
     use_second_axis = False
     if len(sel) == 2:
         use_second_axis = st.checkbox("Zweite y-Achse für zweite Variable", value=False)
@@ -242,7 +339,6 @@ def plot_custom_variables(df: pd.DataFrame):
             st.warning("Resampling erfordert eine gültige Zeitachse – wurde deaktiviert.")
             resample = "Keins"
 
-    # Resampling
     if resample != "Keins" and can_resample:
         rule = {"Täglich (D)":"D", "Wöchentlich (W)":"W", "Monatlich (MS)":"MS"}[resample]
         func = {"Mittel":"mean", "Min":"min", "Max":"max"}[agg]
@@ -250,35 +346,33 @@ def plot_custom_variables(df: pd.DataFrame):
     else:
         data = data[sel]
 
-    # Plot
     fig, ax = plt.subplots(figsize=(12, 4.2))
     if len(sel) == 1 or not use_second_axis:
         for c in sel:
             pd.to_numeric(data[c], errors="coerce").plot(ax=ax, label=c)
         add_grid(ax)
-        ax.set_xlabel("Zeit" if can_resample or x_choice.startswith("Zeit") else "Index")
-        ax.set_ylabel("Wert")
-        ax.set_title("Individuelle Variablen")
-        ax.legend()
+        apply_labels(ax, title_custom, xlabel_custom, ylabel_custom)
+        if show_legend:
+            ax.legend()
     else:
-        # Zwei Achsen: sel[0] links, sel[1] rechts
         c1, c2 = sel[0], sel[1]
         pd.to_numeric(data[c1], errors="coerce").plot(ax=ax, label=c1)
         ax2 = ax.twinx()
         pd.to_numeric(data[c2], errors="coerce").plot(ax=ax2, label=c2, linestyle="--")
         add_grid(ax)
-        ax.set_xlabel("Zeit" if can_resample or x_choice.startswith("Zeit") else "Index")
-        ax.set_ylabel(c1)
-        ax2.set_ylabel(c2)
-        ax.set_title("Individuelle Variablen (2 Achsen)")
+        apply_labels(ax, title_custom, xlabel_custom, ylabel_custom)
+        ax2.set_ylabel(ylabel2_custom if ylabel2_custom.strip() else c2)
         # Gemeinsame Legende
-        lines = ax.get_lines() + ax2.get_lines()
-        labels = [l.get_label() for l in lines]
-        ax.legend(lines, labels, loc="best")
+        if show_legend:
+            lines = ax.get_lines() + ax2.get_lines()
+            labels = [l.get_label() for l in lines]
+            ax.legend(lines, labels, loc="best")
 
+    draw_logo(ax, get_logo_image(), position=logo_pos, scale=logo_scale/100.0, alpha=logo_alpha, pad=logo_padding)
     fig.tight_layout()
     st.pyplot(fig)
 
+# ---------------- Main Flow ----------------
 if uploaded is None:
     st.info("Bitte eine **DAT**-Datei hochladen.")
 else:
@@ -317,11 +411,11 @@ else:
         # Zeitstempel
         df = build_timestamp(df, year=int(year), hour_is_end=bool(hour_is_end))
 
-        # Preview
+        # Vorschau
         st.subheader("Datenvorschau")
         st.dataframe(df.head(preview_rows))
 
-        # Basisinfos
+        # Kennzahlen
         tnum = pd.to_numeric(df["t"], errors="coerce")
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
@@ -335,17 +429,19 @@ else:
         with c5:
             st.metric("WG Mittel [m/s]", f"{pd.to_numeric(df['WG'], errors='coerce').mean():.2f}" if 'WG' in df else "—")
 
+        # Diagramme
         st.markdown("---")
         st.subheader("Grafiken")
-        plot_timeseries(df)
-        plot_hist_box(df)
+        logo_img = get_logo_image()
+        plot_timeseries(df, logo_img)
+        plot_hist_box(df, logo_img)
 
+        # Temperaturbänder
         st.markdown("---")
         st.subheader("Auswertung Temperaturbereiche")
         bands_df = summarize_temp_bands(df, temp_col="t", bands_list=bands)
         st.dataframe(bands_df)
 
-        # Downloads
         colA, colB = st.columns(2)
         with colA:
             st.download_button(
@@ -363,7 +459,7 @@ else:
             )
 
         st.markdown("---")
-        plot_custom_variables(df)
+        plot_custom_variables(df, logo_img)
 
     except Exception as e:
         st.error(f"Fehler beim Laden/Verarbeiten: {e}")
